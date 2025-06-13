@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: smile-snipper-bot
+    env: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: SOLANA_RPC
+        sync: false
+      - key: ETH_RPC
+        sync: false
+      - key: BSC_RPC
+        sync: false
+    autoDeploy: true
+    healthCheckPath: /health 

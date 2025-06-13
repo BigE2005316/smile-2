@@ -1,0 +1,353 @@
+// services/rpcManager.js - Advanced RPC Manager with rate limiting and failover
+const axios = require('axios');
+const { Connection, clusterApiUrl } = require('@solana/web3.js');
+const { JsonRpcProvider } = require('ethers');
+
+class RPCManager {
+  constructor() {
+    this.initialized = false;
+    this.rateLimits = new Map();
+    this.failedRPCs = new Set();
+    this.lastHealthCheck = 0;
+    this.healthCheckInterval = 30000; // 30 seconds
+    
+    // RPC configurations - PREMIUM + RELIABLE FREE ENDPOINTS
+    this.rpcConfigs = {
+      solana: [
+        // Reliable Solana endpoints
+        { url: process.env.ALCHEMY_SOLANA_URL || 'https://api.mainnet-beta.solana.com', priority: 1, maxRequestsPerSecond: 10 },
+      ],
+      ethereum: [
+        // Premium Alchemy endpoint (when user sets it up)
+        { url: process.env.ALCHEMY_ETH_URL || 'https://ethereum.blockpi.network/v1/rpc/public', priority: 1, maxRequestsPerSecond: 10 },
+        { url: 'https://eth.api.onfinality.io/public', priority: 2, maxRequestsPerSecond: 3 },
+      ],
+      bsc: [
+        // Premium Alchemy endpoint (when user sets it up) + reliable free
+        { url: process.env.ALCHEMY_BSC_URL || 'https://bsc-dataseed.binance.org/', priority: 1, maxRequestsPerSecond: 8 },
+        // Removed problematic blockpi endpoint that was causing failures
+      ]
+    };
+    
+    this.connections = {};
+    this.requestCounters = new Map();
+    this.initialize();
+  }
+
+  async initialize() {
+    try {
+      console.log('🌐 Initializing Advanced RPC Manager...');
+      
+      // Initialize connections for each chain
+      for (const [chain, configs] of Object.entries(this.rpcConfigs)) {
+        this.connections[chain] = [];
+        
+        for (const config of configs) {
+          try {
+            let connection;
+            
+            if (chain === 'solana') {
+              connection = new Connection(config.url, {
+                commitment: 'confirmed',
+                confirmTransactionInitialTimeout: 60000,
+                disableRetryOnRateLimit: false
+              });
+            } else {
+              connection = new JsonRpcProvider(config.url);
+            }
+            
+            this.connections[chain].push({
+              ...config,
+              connection,
+              healthy: true,
+              lastUsed: 0,
+              requestCount: 0,
+              errorCount: 0
+            });
+            
+            // Initialize request counter
+            this.requestCounters.set(config.url, {
+              count: 0,
+              lastReset: Date.now()
+            });
+            
+            console.log(`✅ ${chain.toUpperCase()} RPC initialized: ${config.url}`);
+            
+          } catch (error) {
+            console.warn(`⚠️ Failed to initialize ${chain} RPC ${config.url}:`, error.message);
+            this.failedRPCs.add(config.url);
+          }
+        }
+      }
+      
+      // Start health monitoring
+      this.startHealthMonitoring();
+      
+      this.initialized = true;
+      console.log('✅ RPC Manager initialized successfully');
+      
+    } catch (error) {
+      console.error('❌ Failed to initialize RPC Manager:', error);
+      this.initialized = false;
+    }
+  }
+
+  async getBestRPC(chain) {
+    if (!this.initialized || !this.connections[chain]) {
+      throw new Error(`RPC Manager not initialized for chain: ${chain}`);
+    }
+    
+    const connections = this.connections[chain];
+    
+    // Filter healthy connections
+    const healthyConnections = connections.filter(conn => 
+      conn.healthy && 
+      !this.failedRPCs.has(conn.url) &&
+      this.canMakeRequest(conn.url, conn.maxRequestsPerSecond)
+    );
+    
+    if (healthyConnections.length === 0) {
+      // Reset failed RPCs if all are failed (circuit breaker)
+      if (this.failedRPCs.size >= connections.length) {
+        console.log('🔄 Resetting failed RPCs (circuit breaker)');
+        this.failedRPCs.clear();
+        // Try again with reset
+        return this.getBestRPC(chain);
+      }
+      
+      throw new Error(`No healthy RPCs available for ${chain}`);
+    }
+    
+    // Sort by priority and usage
+    healthyConnections.sort((a, b) => {
+      if (a.priority !== b.priority) {
+        return a.priority - b.priority;
+      }
+      return a.requestCount - b.requestCount;
+    });
+    
+    const selected = healthyConnections[0];
+    
+    // Update usage stats
+    selected.lastUsed = Date.now();
+    selected.requestCount++;
+    
+    // Update request counter
+    this.updateRequestCounter(selected.url);
+    
+    return selected.connection;
+  }
+
+  canMakeRequest(url, maxRequestsPerSecond) {
+    const counter = this.requestCounters.get(url);
+    if (!counter) return true;
+    
+    const now = Date.now();
+    const timeSinceReset = now - counter.lastReset;
+    
+    // Reset counter every second
+    if (timeSinceReset >= 1000) {
+      counter.count = 0;
+      counter.lastReset = now;
+      return true;
+    }
+    
+    // More conservative: use 80% of limit to prevent hitting exact limit
+    const safeLimit = Math.floor(maxRequestsPerSecond * 0.8);
+    return counter.count < safeLimit;
+  }
+
+  updateRequestCounter(url) {
+    const counter = this.requestCounters.get(url);
+    if (counter) {
+      counter.count++;
+    }
+  }
+
+  async executeWithRetry(chain, operation, maxRetries = 3) {
+    let lastError;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const rpc = await this.getBestRPC(chain);
+        const result = await operation(rpc);
+        
+        // Reset error count on success
+        this.resetRPCErrors(chain, rpc);
+        
+        return result;
+        
+      } catch (error) {
+        lastError = error;
+        
+        // Handle rate limiting
+        if (error.code === 429 || error.message?.includes('429') || error.message?.includes('rate limit')) {
+          console.warn(`⚠️ Rate limit hit on ${chain}, attempt ${attempt}/${maxRetries}`);
+          
+          // Mark RPC as temporarily failed
+          if (attempt < maxRetries) {
+            await this.handleRateLimit(chain, error);
+            continue;
+          }
+        }
+        
+        // Handle other errors
+        if (error.message?.includes('fetch failed') || error.code === 'NETWORK_ERROR') {
+          console.warn(`⚠️ Network error on ${chain}, attempt ${attempt}/${maxRetries}:`, error.message);
+          
+          if (attempt < maxRetries) {
+            await this.sleep(1000 * attempt); // Exponential backoff
+            continue;
+          }
+        }
+        
+        // Don't retry for these errors
+        if (error.message?.includes('Invalid') || error.message?.includes('Not found')) {
+          throw error;
+        }
+        
+        if (attempt < maxRetries) {
+          await this.sleep(500 * attempt);
+        }
+      }
+    }
+    
+    throw lastError;
+  }
+
+  async handleRateLimit(chain, error) {
+    // Extract retry-after if available
+    let waitTime = 5000; // Default 5 seconds (more conservative)
+    
+    if (error.headers && error.headers['retry-after']) {
+      waitTime = parseInt(error.headers['retry-after']) * 1000;
+    } else if (error.message?.includes('wait')) {
+      const match = error.message.match(/(\d+)/);
+      if (match) {
+        waitTime = parseInt(match[1]) * 1000;
+      }
+    }
+    
+    // More conservative wait times
+    waitTime = Math.min(Math.max(waitTime, 5000), 60000); // Min 5s, Max 60s
+    
+    console.log(`⏳ Rate limited on ${chain}, waiting ${waitTime}ms before retry...`);
+    await this.sleep(waitTime);
+  }
+
+  resetRPCErrors(chain, connection) {
+    if (this.connections[chain]) {
+      const rpc = this.connections[chain].find(c => c.connection === connection);
+      if (rpc) {
+        rpc.errorCount = 0;
+        rpc.healthy = true;
+        this.failedRPCs.delete(rpc.url);
+      }
+    }
+  }
+
+  async sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  startHealthMonitoring() {
+    setInterval(async () => {
+      try {
+        await this.performHealthCheck();
+      } catch (error) {
+        console.error('Health check error:', error.message);
+      }
+    }, this.healthCheckInterval);
+  }
+
+  async performHealthCheck() {
+    const now = Date.now();
+    
+    // Skip if recently checked
+    if (now - this.lastHealthCheck < this.healthCheckInterval / 2) {
+      return;
+    }
+    
+    this.lastHealthCheck = now;
+    
+    for (const [chain, connections] of Object.entries(this.connections)) {
+      for (const rpc of connections) {
+        try {
+          // Simple health check
+          if (chain === 'solana') {
+            await rpc.connection.getSlot();
+          } else {
+            await rpc.connection.getBlockNumber();
+          }
+          
+          rpc.healthy = true;
+          rpc.errorCount = 0;
+          this.failedRPCs.delete(rpc.url);
+          
+        } catch (error) {
+          rpc.errorCount++;
+          
+          if (rpc.errorCount >= 3) {
+            rpc.healthy = false;
+            this.failedRPCs.add(rpc.url);
+            console.warn(`⚠️ Marking ${chain} RPC as unhealthy: ${rpc.url}`);
+          }
+        }
+      }
+    }
+  }
+
+  // Helper methods for specific operations
+  async getSolanaConnection() {
+    return this.getBestRPC('solana');
+  }
+
+  async getEthereumProvider() {
+    return this.getBestRPC('ethereum');
+  }
+
+  async getBSCProvider() {
+    return this.getBestRPC('bsc');
+  }
+
+  // Get status for monitoring
+  getStatus() {
+    const status = {
+      initialized: this.initialized,
+      chains: {},
+      failedRPCs: Array.from(this.failedRPCs),
+      totalRPCs: 0,
+      healthyRPCs: 0
+    };
+
+    for (const [chain, connections] of Object.entries(this.connections)) {
+      const healthy = connections.filter(c => c.healthy && !this.failedRPCs.has(c.url));
+      
+      status.chains[chain] = {
+        total: connections.length,
+        healthy: healthy.length,
+        failed: connections.length - healthy.length
+      };
+      
+      status.totalRPCs += connections.length;
+      status.healthyRPCs += healthy.length;
+    }
+
+    return status;
+  }
+}
+
+// Singleton instance
+let rpcManager = null;
+
+function getRPCManager() {
+  if (!rpcManager) {
+    rpcManager = new RPCManager();
+  }
+  return rpcManager;
+}
+
+module.exports = {
+  getRPCManager,
+  RPCManager
+}; 
