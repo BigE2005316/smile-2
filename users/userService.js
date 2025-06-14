@@ -1,4 +1,4 @@
-// users/userService.js
+// users/userService.js - Enhanced User Service with Position Tracking
 const fs = require('fs');
 const path = require('path');
 const redis = require('redis');
@@ -33,16 +33,24 @@ async function initRedis() {
 // Load all users from file (fallback)
 function loadUserData() {
   try {
-    const data = fs.readFileSync(DATA_FILE, 'utf-8');
-    return JSON.parse(data);
-  } catch {
+    if (fs.existsSync(DATA_FILE)) {
+      const data = fs.readFileSync(DATA_FILE, 'utf-8');
+      return JSON.parse(data);
+    }
+    return {};
+  } catch (err) {
+    console.error('Error loading user data from file:', err);
     return {};
   }
 }
 
 // Persist to disk (fallback)
 function saveUserData(data) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+  try {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+  } catch (err) {
+    console.error('Error saving user data to file:', err);
+  }
 }
 
 // Get user data from Redis or file
@@ -64,7 +72,7 @@ async function getUserData(userId) {
 }
 
 // Save user data to Redis or file
-async function saveUserData_new(userId, userData) {
+async function saveUserData(userId, userData) {
   const client = await initRedis();
   
   if (client) {
@@ -88,6 +96,7 @@ function createDefaultUser() {
       wallets: [],
       chain: null,
       amount: null,
+      slippage: 5,
       sellTargets: [],
       dailyLimit: null,
     stopLoss: false,
@@ -105,9 +114,11 @@ function createDefaultUser() {
       losses: 0,
       totalPnL: 0,
       dailySpent: 0,
-      lastResetDate: new Date().toDateString()
+      lastResetDate: new Date().toDateString(),
+      lastActive: new Date().toISOString()
     },
-    walletNames: {}
+    walletNames: {},
+    smartSlippage: false
   };
 }
 
@@ -115,7 +126,7 @@ async function ensureUser(userId) {
   let userData = await getUserData(userId);
   if (!userData) {
     userData = createDefaultUser();
-    await saveUserData_new(userId, userData);
+    await saveUserData(userId, userData);
   }
   
   // Ensure all new fields exist (for backward compatibility)
@@ -127,12 +138,10 @@ async function ensureUser(userId) {
       stopLossPercent: 0,
       sellMode: 'proportional'
     };
-    await saveUserData_new(userId, userData);
   }
   
   if (!userData.positions) {
     userData.positions = {};
-    await saveUserData_new(userId, userData);
   }
   
   if (!userData.stats) {
@@ -142,14 +151,23 @@ async function ensureUser(userId) {
       losses: 0,
       totalPnL: 0,
       dailySpent: 0,
-      lastResetDate: new Date().toDateString()
+      lastResetDate: new Date().toDateString(),
+      lastActive: new Date().toISOString()
     };
-    await saveUserData_new(userId, userData);
+  } else if (!userData.stats.lastActive) {
+    userData.stats.lastActive = new Date().toISOString();
   }
   
   if (!userData.walletNames) {
     userData.walletNames = {};
-    await saveUserData_new(userId, userData);
+  }
+  
+  if (userData.slippage === undefined) {
+    userData.slippage = 5;
+  }
+  
+  if (userData.smartSlippage === undefined) {
+    userData.smartSlippage = false;
   }
   
   return userData;
@@ -160,7 +178,7 @@ async function addWallet(userId, wallet) {
   const userData = await ensureUser(userId);
   if (!userData.wallets.includes(wallet)) {
     userData.wallets.push(wallet);
-    await saveUserData_new(userId, userData);
+    await saveUserData(userId, userData);
   }
 }
 
@@ -168,42 +186,50 @@ async function addWallet(userId, wallet) {
 async function removeWallet(userId, wallet) {
   const userData = await ensureUser(userId);
   userData.wallets = userData.wallets.filter(w => w !== wallet);
-  await saveUserData_new(userId, userData);
+  await saveUserData(userId, userData);
 }
 
 // Set chain
 async function setChain(userId, chain) {
   const userData = await ensureUser(userId);
   userData.chain = chain;
-  await saveUserData_new(userId, userData);
+  await saveUserData(userId, userData);
 }
 
 // Set trade amount
 async function setAmount(userId, amount) {
   const userData = await ensureUser(userId);
   userData.amount = amount;
-  await saveUserData_new(userId, userData);
+  await saveUserData(userId, userData);
+}
+
+// Set slippage
+async function setSlippage(userId, slippage, smartSlippage = false) {
+  const userData = await ensureUser(userId);
+  userData.slippage = slippage;
+  userData.smartSlippage = smartSlippage;
+  await saveUserData(userId, userData);
 }
 
 // Set sell targets
 async function setSellTargets(userId, targets) {
   const userData = await ensureUser(userId);
   userData.sellTargets = targets;
-  await saveUserData_new(userId, userData);
+  await saveUserData(userId, userData);
 }
 
 // Set daily limit
 async function setDailyLimit(userId, limit) {
   const userData = await ensureUser(userId);
   userData.dailyLimit = limit;
-  await saveUserData_new(userId, userData);
+  await saveUserData(userId, userData);
 }
 
 // Enable/disable stop-loss
 async function setStopLoss(userId, enabled) {
   const userData = await ensureUser(userId);
   userData.stopLoss = Boolean(enabled);
-  await saveUserData_new(userId, userData);
+  await saveUserData(userId, userData);
 }
 
 // Update trading stats (only count ACTUAL trades)
@@ -231,7 +257,10 @@ async function updateStats(userId, trade) {
     userData.stats.totalPnL += trade.pnl || 0;
   }
   
-  await saveUserData_new(userId, userData);
+  // Update last active timestamp
+  userData.stats.lastActive = new Date().toISOString();
+  
+  await saveUserData(userId, userData);
 }
 
 // Get full settings
@@ -291,7 +320,7 @@ async function setCopySells(userId, enabled) {
     };
   }
   userData.copySettings.copySells = Boolean(enabled);
-  await saveUserData_new(userId, userData);
+  await saveUserData(userId, userData);
 }
 
 async function setCustomTPSL(userId, enabled) {
@@ -306,7 +335,7 @@ async function setCustomTPSL(userId, enabled) {
     };
   }
   userData.copySettings.customTPSL = Boolean(enabled);
-  await saveUserData_new(userId, userData);
+  await saveUserData(userId, userData);
 }
 
 async function setTakeProfit(userId, tpLevels) {
@@ -321,7 +350,7 @@ async function setTakeProfit(userId, tpLevels) {
     };
   }
   userData.copySettings.takeProfit = tpLevels;
-  await saveUserData_new(userId, userData);
+  await saveUserData(userId, userData);
 }
 
 async function setStopLossPercent(userId, percent) {
@@ -336,7 +365,7 @@ async function setStopLossPercent(userId, percent) {
     };
   }
   userData.copySettings.stopLossPercent = percent;
-  await saveUserData_new(userId, userData);
+  await saveUserData(userId, userData);
 }
 
 async function setSellMode(userId, mode) {
@@ -351,7 +380,7 @@ async function setSellMode(userId, mode) {
     };
   }
   userData.copySettings.sellMode = mode; // 'proportional' or 'manual'
-  await saveUserData_new(userId, userData);
+  await saveUserData(userId, userData);
 }
 
 // Position tracking for copy trades
@@ -366,6 +395,9 @@ async function addPosition(userId, tokenAddress, amount, price, sourceWallet) {
     userData.positions[tokenAddress] = {
       totalAmount: 0,
       avgPrice: 0,
+      tokenSymbol: 'Unknown',
+      tokenName: 'Unknown Token',
+      chain: userData.chain || 'solana',
       copyTrades: []
     };
   }
@@ -385,7 +417,9 @@ async function addPosition(userId, tokenAddress, amount, price, sourceWallet) {
   position.totalAmount += amount;
   position.avgPrice = totalValue / position.totalAmount;
   
-  await saveUserData_new(userId, userData);
+  await saveUserData(userId, userData);
+  
+  return position;
 }
 
 async function sellPosition(userId, tokenAddress, sellPercentage, currentPrice) {
@@ -408,12 +442,22 @@ async function sellPosition(userId, tokenAddress, sellPercentage, currentPrice) 
   // Update position
   position.totalAmount -= sellAmount;
   
+  // Add sell trade record
+  if (!position.copyTrades) position.copyTrades = [];
+  position.copyTrades.push({
+    type: 'sell',
+    amount: sellAmount,
+    price: currentPrice,
+    pnl,
+    timestamp: new Date().toISOString()
+  });
+  
   // Remove position if fully sold
   if (position.totalAmount <= 0.001) {
     delete userData.positions[tokenAddress];
   }
   
-  await saveUserData_new(userId, userData);
+  await saveUserData(userId, userData);
   
   return {
     success: true,
@@ -421,6 +465,30 @@ async function sellPosition(userId, tokenAddress, sellPercentage, currentPrice) 
     pnl,
     remainingAmount: position.totalAmount
   };
+}
+
+// Get user positions
+async function getUserPositions(userId) {
+  const userData = await ensureUser(userId);
+  const positions = [];
+  
+  if (!userData.positions) {
+    return positions;
+  }
+  
+  for (const [tokenAddress, position] of Object.entries(userData.positions)) {
+    positions.push({
+      tokenAddress,
+      tokenSymbol: position.tokenSymbol || 'Unknown',
+      tokenName: position.tokenName || 'Unknown Token',
+      amount: position.totalAmount,
+      avgBuyPrice: position.avgPrice,
+      chain: position.chain || userData.chain || 'solana',
+      trades: position.copyTrades || []
+    });
+  }
+  
+  return positions;
 }
 
 // Admin Statistics Functions - ONLY COUNT REAL FEES
@@ -543,6 +611,9 @@ async function getGlobalUserStats() {
     solanaUsers: 0,
     ethereumUsers: 0,
     bscUsers: 0,
+    polygonUsers: 0,
+    arbitrumUsers: 0,
+    baseUsers: 0,
     totalWallets: 0,
     avgWalletsPerUser: 0,
     usersWithPositions: 0,
@@ -565,6 +636,9 @@ async function getGlobalUserStats() {
     if (userData.chain === 'solana') stats.solanaUsers++;
     else if (userData.chain === 'ethereum') stats.ethereumUsers++;
     else if (userData.chain === 'bsc') stats.bscUsers++;
+    else if (userData.chain === 'polygon') stats.polygonUsers++;
+    else if (userData.chain === 'arbitrum') stats.arbitrumUsers++;
+    else if (userData.chain === 'base') stats.baseUsers++;
     
     // Count wallets
     stats.totalWallets += (userData.wallets || []).length;
@@ -575,10 +649,10 @@ async function getGlobalUserStats() {
       stats.totalPositions += Object.keys(userData.positions).length;
     }
     
-    // Activity tracking (would need last activity timestamp in real implementation)
-    const lastActivity = userData.stats?.lastActivity;
-    if (lastActivity) {
-      const timeSince = now - new Date(lastActivity).getTime();
+    // Activity tracking
+    const lastActive = userData.stats?.lastActive;
+    if (lastActive) {
+      const timeSince = now - new Date(lastActive).getTime();
       if (timeSince < day) stats.activeUsers24h++;
       if (timeSince < week) stats.activeUsers7d++;
     }
@@ -596,7 +670,7 @@ async function getAllUsers() {
     
     if (client) {
       const userKeys = await client.keys('user:*');
-      const users = [];
+      const users = {};
       
       for (const key of userKeys) {
         try {
@@ -604,7 +678,7 @@ async function getAllUsers() {
           if (userData) {
             const user = JSON.parse(userData);
             const userId = key.replace('user:', '');
-            users.push({ ...user, id: userId, userId });
+            users[userId] = { ...user, id: userId, userId };
           }
         } catch (err) {
           console.error(`Error parsing user data for ${key}:`, err);
@@ -614,25 +688,11 @@ async function getAllUsers() {
       return users;
     } else {
       // Fallback to file storage
-      const users = [];
-      try {
-        const files = fs.readdirSync('data');
-        for (const file of files) {
-          if (file.startsWith('user_') && file.endsWith('.json')) {
-            const userId = file.replace('user_', '').replace('.json', '');
-            const userData = await getUserSettings(userId);
-            users.push({ ...userData, id: userId, userId });
-          }
-        }
-      } catch (err) {
-        console.error('Error reading user files:', err);
-      }
-      
-      return users;
+      return loadUserData();
     }
   } catch (err) {
     console.error('Error getting all users:', err);
-    return [];
+    return {};
   }
 }
 
@@ -649,7 +709,7 @@ async function getAdminData() {
       }
     } else {
       // Fallback to file storage
-      const adminFile = path.join(dataDir, 'admin_data.json');
+      const adminFile = path.join(__dirname, 'adminData.json');
       if (fs.existsSync(adminFile)) {
         const data = fs.readFileSync(adminFile, 'utf8');
         return JSON.parse(data);
@@ -692,7 +752,7 @@ async function saveAdminData(adminData) {
       await client.set(adminKey, JSON.stringify(adminData));
     } else {
       // Fallback to file storage
-      const adminFile = path.join(dataDir, 'admin_data.json');
+      const adminFile = path.join(__dirname, 'adminData.json');
       fs.writeFileSync(adminFile, JSON.stringify(adminData, null, 2));
     }
   } catch (err) {
@@ -751,145 +811,26 @@ async function updateAdminStats(statsUpdate) {
   }
 }
 
-// Add position with better error handling
-async function addPosition(userId, tokenAddress, amount, price, source = 'unknown') {
-  try {
-    const userData = await getUserSettings(userId);
-    
-    if (!userData.positions) {
-      userData.positions = {};
-    }
-    
-    if (userData.positions[tokenAddress]) {
-      // Update existing position
-      const currentPosition = userData.positions[tokenAddress];
-      const currentValue = currentPosition.totalAmount * currentPosition.avgPrice;
-      const newValue = amount * price;
-      const totalValue = currentValue + newValue;
-      const totalAmount = currentPosition.totalAmount + amount;
-      
-      userData.positions[tokenAddress] = {
-        ...currentPosition,
-        totalAmount,
-        avgPrice: totalValue / totalAmount,
-        lastUpdate: new Date().toISOString(),
-        source
-      };
-    } else {
-      // Create new position
-      userData.positions[tokenAddress] = {
-        totalAmount: amount,
-        avgPrice: price,
-        entryPrice: price,
-        createdAt: new Date().toISOString(),
-        lastUpdate: new Date().toISOString(),
-        source,
-        trades: []
-      };
-    }
-    
-    // Add trade record
-    userData.positions[tokenAddress].trades.push({
-      type: 'buy',
-      amount,
-      price,
-      timestamp: new Date().toISOString(),
-      source
-    });
-    
-    await saveUserData(userId, userData);
-    return userData.positions[tokenAddress];
-  } catch (err) {
-    console.error('Error adding position:', err);
-    throw err;
-  }
-}
-
-// Sell position with better tracking
-async function sellPosition(userId, tokenAddress, sellPercent, currentPrice) {
-  try {
-    const userData = await getUserSettings(userId);
-    
-    if (!userData.positions || !userData.positions[tokenAddress]) {
-      throw new Error('Position not found');
-    }
-    
-    const position = userData.positions[tokenAddress];
-    const sellAmount = position.totalAmount * (sellPercent / 100);
-    const remainingAmount = position.totalAmount - sellAmount;
-    
-    // Calculate PnL
-    const costBasis = sellAmount * position.avgPrice;
-    const proceeds = sellAmount * currentPrice;
-    const pnl = proceeds - costBasis;
-    
-    // Add trade record
-    if (!position.trades) position.trades = [];
-    position.trades.push({
-      type: 'sell',
-      amount: sellAmount,
-      price: currentPrice,
-      pnl,
-      timestamp: new Date().toISOString()
-    });
-    
-    if (remainingAmount <= 0.00001) {
-      // Close position completely
-      delete userData.positions[tokenAddress];
-    } else {
-      // Update remaining position
-      position.totalAmount = remainingAmount;
-      position.lastUpdate = new Date().toISOString();
-    }
-    
-    // Update user stats
-    if (!userData.stats) userData.stats = {};
-    userData.stats.totalPnL = (userData.stats.totalPnL || 0) + pnl;
-    if (pnl > 0) {
-      userData.stats.wins = (userData.stats.wins || 0) + 1;
-    } else {
-      userData.stats.losses = (userData.stats.losses || 0) + 1;
-    }
-    
-    await saveUserData(userId, userData);
-    
-    return {
-      sellAmount,
-      proceeds,
-      pnl,
-      remainingAmount,
-      closed: remainingAmount <= 0.00001
-    };
-  } catch (err) {
-    console.error('Error selling position:', err);
-    throw err;
-  }
-}
-
-// Get user settings by wallet address
-async function getUserSettingsByAddress(address, chain) {
-  try {
-    const allUsers = await getAllUsers();
-    
-    for (const user of allUsers) {
-      if (user.custodialWallets && user.custodialWallets[chain] && 
-          user.custodialWallets[chain].address === address) {
-        return user;
-      }
-    }
-    
-    return null;
-  } catch (err) {
-    console.error('Error getting user by address:', err);
-    return null;
-  }
-}
-
 // Update user's last active timestamp
 async function updateLastActive(userId) {
   try {
     const userData = await getUserSettings(userId);
-    userData.lastActive = new Date().toISOString();
+    if (!userData) return;
+    
+    if (!userData.stats) {
+      userData.stats = {
+        totalTrades: 0,
+        wins: 0,
+        losses: 0,
+        totalPnL: 0,
+        dailySpent: 0,
+        lastResetDate: new Date().toDateString(),
+        lastActive: new Date().toISOString()
+      };
+    } else {
+      userData.stats.lastActive = new Date().toISOString();
+    }
+    
     await saveUserData(userId, userData);
   } catch (err) {
     console.error('Error updating last active:', err);
@@ -901,6 +842,7 @@ module.exports = {
   removeWallet,
   setChain,
   setAmount,
+  setSlippage,
   setSellTargets,
   setDailyLimit,
   setStopLoss,
@@ -914,8 +856,10 @@ module.exports = {
   setTakeProfit,
   setStopLossPercent,
   setSellMode,
+  // Position tracking
   addPosition,
   sellPosition,
+  getUserPositions,
   // Admin functions
   updateAdminStats,
   getAdminStats,
@@ -924,8 +868,7 @@ module.exports = {
   getAllUsers,
   getAdminData,
   saveAdminData,
-  getUserSettingsByAddress,
   updateLastActive,
   // Add the missing saveUserData function
-  saveUserData: saveUserData_new
+  saveUserData
 };

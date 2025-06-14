@@ -22,7 +22,7 @@ class ManualTradingService {
       maxSlippage: 50, // 50%
       minAmount: 0.0001,
       maxAmount: 1000000,
-      supportedChains: ['solana', 'ethereum', 'bsc', 'polygon', 'arbitrum', 'optimism', 'base', 'avalanche']
+      supportedChains: ['solana', 'ethereum', 'bsc', 'polygon', 'arbitrum', 'base']
     };
     
     // Start initialization process
@@ -55,6 +55,13 @@ class ManualTradingService {
         this.tradingExecutor = getRealTradingExecutor();
         if (this.tradingExecutor) {
           console.log('✅ Trading executor ready');
+          
+          // Force initialize trading executor if needed
+          if (!this.tradingExecutor.isHealthy()) {
+            console.log('⚠️ Trading executor not healthy, attempting to initialize...');
+            await this.tradingExecutor.forceInitialize();
+          }
+          
         } else {
           console.log('⚠️ Trading executor not available');
           coreServicesReady = false;
@@ -159,6 +166,13 @@ class ManualTradingService {
       try {
         if (this.tradingExecutor && this.tradingExecutor.isHealthy) {
           executorHealthy = this.tradingExecutor.isHealthy();
+          
+          // Try to reinitialize if not healthy
+          if (!executorHealthy) {
+            console.log('⚠️ Trading executor not healthy, attempting to reinitialize...');
+            await this.tradingExecutor.forceInitialize();
+            executorHealthy = this.tradingExecutor.isHealthy();
+          }
         }
       } catch (error) {
         console.warn('Trading executor health check failed:', error.message);
@@ -180,7 +194,10 @@ class ManualTradingService {
     try {
       // Check if service is initialized
       if (!this.initialized) {
-        throw new Error('Manual trading service not initialized');
+        await this.forceInitialize();
+        if (!this.initialized) {
+          throw new Error('Manual trading service not initialized');
+        }
       }
       
       // Validate user
@@ -262,10 +279,18 @@ class ManualTradingService {
             message += `💵 **Price:** $${result.executedPrice.toFixed(8)}\n`;
             message += `⛽ **${result.feeDisplay}**\n\n`;
             message += `📝 **TX Hash:** \`${result.txHash}\`\n`;
+            
+            if (result.explorerUrl) {
+              message += `🔍 **View on Explorer:** [Click here](${result.explorerUrl})\n\n`;
+            }
+            
             message += `⏰ **Time:** ${new Date().toLocaleString()}\n`;
             message += `🌐 **Chain:** ${chain.toUpperCase()}`;
             
-            await this.botInstance.telegram.sendMessage(userId, message, { parse_mode: 'Markdown' });
+            await this.botInstance.telegram.sendMessage(userId, message, { 
+              parse_mode: 'Markdown',
+              disable_web_page_preview: true
+            });
           } catch (notifyError) {
             console.warn('Failed to notify user:', notifyError.message);
           }
@@ -288,7 +313,10 @@ class ManualTradingService {
     try {
       // Check if service is initialized
       if (!this.initialized) {
-        throw new Error('Manual trading service not initialized');
+        await this.forceInitialize();
+        if (!this.initialized) {
+          throw new Error('Manual trading service not initialized');
+        }
       }
       
       // Validate user
@@ -371,10 +399,18 @@ class ManualTradingService {
             message += `${pnlEmoji} **PnL:** ${result.pnl >= 0 ? '+' : ''}${result.pnlPercentage.toFixed(2)}% ($${result.pnl.toFixed(2)})\n`;
             message += `⛽ **${result.feeDisplay}**\n\n`;
             message += `📝 **TX Hash:** \`${result.txHash}\`\n`;
+            
+            if (result.explorerUrl) {
+              message += `🔍 **View on Explorer:** [Click here](${result.explorerUrl})\n\n`;
+            }
+            
             message += `⏰ **Time:** ${new Date().toLocaleString()}\n`;
             message += `🌐 **Chain:** ${chain.toUpperCase()}`;
             
-            await this.botInstance.telegram.sendMessage(userId, message, { parse_mode: 'Markdown' });
+            await this.botInstance.telegram.sendMessage(userId, message, { 
+              parse_mode: 'Markdown',
+              disable_web_page_preview: true
+            });
           } catch (notifyError) {
             console.warn('Failed to notify user:', notifyError.message);
           }
@@ -396,7 +432,10 @@ class ManualTradingService {
   async getUserPositions(userId) {
     try {
       if (!this.initialized) {
-        throw new Error('Manual trading service not initialized');
+        await this.forceInitialize();
+        if (!this.initialized) {
+          throw new Error('Manual trading service not initialized');
+        }
       }
       
       const positions = await userService.getUserPositions(userId);
@@ -443,7 +482,10 @@ class ManualTradingService {
   async getTokenQuote(tokenAddress, chain, amount, tradeType = 'buy') {
     try {
       if (!this.initialized) {
-        throw new Error('Manual trading service not initialized');
+        await this.forceInitialize();
+        if (!this.initialized) {
+          throw new Error('Manual trading service not initialized');
+        }
       }
       
       const tokenInfo = await tokenDataService.getTokenData(tokenAddress, chain);
@@ -807,7 +849,7 @@ class ManualTradingService {
         } else {
           return {
             success: false,
-            message: `❌ Buy order failed: ${result.message}`
+            message: `❌ Buy order failed: ${result.message || result.error}`
           };
         }
       } else {
@@ -822,7 +864,7 @@ class ManualTradingService {
         } else {
           return {
             success: false,
-            message: `❌ Sell order failed: ${result.message}`
+            message: `❌ Sell order failed: ${result.message || result.error}`
           };
         }
       }
@@ -837,14 +879,17 @@ class ManualTradingService {
 
   // Get service statistics
   getStats() {
-    const executorStats = this.tradingExecutor.getStats();
+    const executorStats = this.tradingExecutor ? this.tradingExecutor.getStats() : { initialized: false };
     
     return {
       initialized: this.initialized,
       pendingTrades: this.pendingTrades.size,
       pendingTimeouts: this.confirmationTimeouts.size,
       executorStats,
-      healthStatus: this.tradingExecutor.isHealthy() ? 'healthy' : 'unhealthy'
+      healthStatus: this.tradingExecutor && this.tradingExecutor.isHealthy ? 
+                   (this.tradingExecutor.isHealthy() ? 'healthy' : 'unhealthy') : 
+                   'unknown',
+      supportedChains: this.config.supportedChains
     };
   }
 
@@ -880,4 +925,4 @@ module.exports = {
   getManualTradingService,
   initializeManualTrading,
   ManualTradingService
-}; 
+};

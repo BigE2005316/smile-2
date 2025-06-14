@@ -20,292 +20,15 @@ function isValidWallet(address) {
   return false;
 }
 
-// Handle manual trading commands
-messageHandler.command('buy', async (ctx) => {
-  try {
-    const userId = ctx.from.id;
-    await userService.updateLastActive(userId);
-    
-    const manualTradingService = getManualTradingService();
-    
-    // Check if service is initialized
-    if (!manualTradingService.isInitialized()) {
-      return ctx.reply('❌ Trading service not initialized. Please try again.');
-    }
-    
-    const args = ctx.message.text.split(' ').slice(1);
-    
-    if (args.length === 0) {
-      return ctx.reply(`📝 **Buy Command Usage:**
-
-**Basic Usage:**
-• \`/buy <token_address>\` - Buy with default amount
-• \`/buy <amount> <token_address>\` - Buy specific amount
-
-**Quick Buy Commands:**
-• \`/buybnb <amount> <token>\` - Buy with BNB (BSC)
-• \`/buyeth <amount> <token>\` - Buy with ETH (Ethereum)  
-• \`/buysol <amount> <token>\` - Buy with SOL (Solana)
-
-**Examples:**
-• \`/buy So11111111111111111111111111111111111111112\`
-• \`/buy 0.1 So11111111111111111111111111111111111111112\`
-• \`/buysol 0.5 BONK\`
-
-**Features:**
-✅ Trade simulation before execution
-✅ Price impact alerts
-✅ Smart slippage calculation
-✅ Confirmation dialogs`, { parse_mode: 'Markdown' });
-    }
-    
-    // Get user settings
-    const userSettings = await userService.getUserSettings(userId);
-    if (!userSettings) {
-      return ctx.reply('❌ Please set up your account first with /start');
-    }
-    
-    if (!userSettings.chain) {
-      return ctx.reply('⚠️ Please set your chain first. Use /help to get started.');
-    }
-    
-    // Parse arguments
-    let amount, tokenAddress;
-    
-    if (args.length === 1) {
-      // Just token address, use default amount
-      tokenAddress = args[0];
-      amount = userSettings.amount || 0.1;
-    } else if (args.length === 2) {
-      // Amount and token
-      amount = parseFloat(args[0]);
-      tokenAddress = args[1];
-      
-      if (isNaN(amount) || amount <= 0) {
-        return ctx.reply('❌ Invalid amount. Amount must be a positive number.');
-      }
-    } else {
-      return ctx.reply('❌ Invalid format. Use: `/buy [amount] <token_address>`', { parse_mode: 'Markdown' });
-    }
-    
-    // Validate token address
-    if (!tokenAddress || tokenAddress.length < 10) {
-      return ctx.reply('❌ Invalid token address provided.');
-    }
-    
-    // Check wallet
-    if (!userSettings.custodialWallets || !userSettings.custodialWallets[userSettings.chain]) {
-      return ctx.reply('⚠️ Please create a wallet first with /wallet');
-    }
-    
-    // Get token information
-    const tokenInfo = await tokenDataService.getTokenInfo(tokenAddress, userSettings.chain);
-    if (!tokenInfo) {
-      return ctx.reply('❌ Failed to get token information. Please check the token address.');
-    }
-    
-    // Create buy confirmation
-    const tradeParams = {
-      tokenAddress: tokenInfo.address,
-      amount,
-      chain: userSettings.chain,
-      slippage: userSettings.slippage || 5,
-      wallet: userSettings.selectedWallet
-    };
-    
-    const confirmation = await manualTradingService.createTradeConfirmation(userId, {
-      ...tradeParams,
-      tradeType: 'buy'
-    });
-    
-    if (!confirmation.success) {
-      return ctx.reply(`❌ Failed to create trade confirmation: ${confirmation.message}`);
-    }
-    
-    // Format confirmation message
-    const chainEmoji = userSettings.chain === 'solana' ? '🟣' : userSettings.chain === 'ethereum' ? '🔷' : '🟡';
-    const chainSymbol = userSettings.chain === 'solana' ? 'SOL' : userSettings.chain === 'ethereum' ? 'ETH' : 'BNB';
-    
-    let message = `🟢 **Confirm BUY Order** ${chainEmoji}\n\n`;
-    message += `🎯 **${tokenInfo.name}** (${tokenInfo.symbol})\n`;
-    message += `**Amount:** ${amount} ${chainSymbol}\n\n`;
-    
-    message += `📊 **Token Info:**\n`;
-    message += `• **Price:** $${tokenInfo.price?.toFixed(6) || 'Unknown'}\n`;
-    message += `• **Market Cap:** $${tokenInfo.marketCap ? tokenInfo.marketCap.toLocaleString() : 'Unknown'}\n`;
-    
-    if (tokenInfo.priceChange24h !== undefined) {
-      const changeEmoji = tokenInfo.priceChange24h >= 0 ? '📈' : '📉';
-      message += `• **24h Change:** ${changeEmoji} ${tokenInfo.priceChange24h.toFixed(2)}%\n`;
-    }
-    
-    message += `\n📍 **Contract:** \`${tokenInfo.address}\`\n\n`;
-    
-    // Calculate fees
-    const devFeePercent = parseFloat(process.env.DEV_FEE_PERCENT || '3');
-    const devFee = amount * (devFeePercent / 100);
-    const netAmount = amount - devFee;
-    
-    message += `💰 **Order Summary:**\n`;
-    message += `• Total Cost: ${amount} ${chainSymbol}\n`;
-    message += `• Dev Fee (${devFeePercent}%): ${devFee.toFixed(4)}\n`;
-    message += `• Net Amount: ${netAmount.toFixed(4)}\n\n`;
-    
-    message += `⚠️ **Reply YES to confirm or NO to cancel**\n`;
-    message += `⏰ Expires in 60 seconds`;
-    
-    // Store trade ID in session
-    ctx.session.pendingTradeId = confirmation.tradeId;
-    ctx.session.awaitingTradeConfirmation = true;
-    
-    await ctx.reply(message, { parse_mode: 'Markdown' });
-    
-  } catch (error) {
-    console.error('Buy command error:', error);
-    await ctx.reply('❌ Error processing buy command. Please try again.');
-  }
-});
-
-// Handle sell command
-messageHandler.command('sell', async (ctx) => {
-  try {
-    const userId = ctx.from.id;
-    await userService.updateLastActive(userId);
-    
-    const manualTradingService = getManualTradingService();
-    
-    // Check if service is initialized
-    if (!manualTradingService.isInitialized()) {
-      return ctx.reply('❌ Trading service not initialized. Please try again.');
-    }
-    
-    const args = ctx.message.text.split(' ').slice(1);
-    
-    if (args.length === 0) {
-      // Show user positions
-      const positions = await manualTradingService.getUserPositions(userId);
-      
-      if (positions.length === 0) {
-        return ctx.reply('❌ You have no positions to sell. Buy tokens first!');
-      }
-      
-      let message = `📊 **Your Positions**\n\n`;
-      
-      for (const position of positions) {
-        const pnlEmoji = position.pnl >= 0 ? '🟢' : '🔴';
-        message += `${pnlEmoji} **${position.tokenSymbol}**\n`;
-        message += `Amount: ${position.amount?.toFixed(4) || 0}\n`;
-        message += `Avg Price: $${position.avgBuyPrice?.toFixed(6) || 0}\n`;
-        message += `Current: $${position.currentPrice?.toFixed(6) || 0}\n`;
-        message += `PnL: ${position.pnl >= 0 ? '+' : ''}${position.pnlPercentage?.toFixed(2) || 0}%\n`;
-        message += `\`${position.tokenAddress}\`\n\n`;
-      }
-      
-      message += `💡 **To sell:**\n`;
-      message += `• Full position: \`/sell <token_address>\`\n`;
-      message += `• Partial: \`/sell 50% <token_address>\`\n`;
-      message += `\nExample: \`/sell 50% ${positions[0]?.tokenAddress || 'TOKEN_ADDRESS'}\``;
-      
-      return ctx.reply(message, { parse_mode: 'Markdown' });
-    }
-    
-    // Parse sell arguments
-    let percentage = 100;
-    let tokenAddress;
-    
-    if (args.length === 1) {
-      if (args[0].includes('%')) {
-        return ctx.reply('❌ Please specify both percentage and token address.\nExample: `/sell 50% <token_address>`', { parse_mode: 'Markdown' });
-      } else {
-        tokenAddress = args[0];
-      }
-    } else if (args.length === 2) {
-      percentage = parseFloat(args[0].replace('%', ''));
-      tokenAddress = args[1];
-      
-      if (isNaN(percentage) || percentage <= 0 || percentage > 100) {
-        return ctx.reply('❌ Invalid percentage. Must be between 1% and 100%.');
-      }
-    } else {
-      return ctx.reply('❌ Invalid format. Use: `/sell [percentage%] <token_address>`', { parse_mode: 'Markdown' });
-    }
-    
-    // Get user settings and positions
-    const userSettings = await userService.getUserSettings(userId);
-    if (!userSettings) {
-      return ctx.reply('❌ Please set up your account first with /start');
-    }
-    
-    const positions = await manualTradingService.getUserPositions(userId);
-    const position = positions.find(p => 
-      p.tokenAddress.toLowerCase() === tokenAddress.toLowerCase()
-    );
-    
-    if (!position) {
-      return ctx.reply('❌ You don\'t have a position in this token.');
-    }
-    
-    // Create sell confirmation
-    const tradeParams = {
-      tokenAddress: position.tokenAddress,
-      percentage,
-      chain: position.chain,
-      slippage: userSettings.slippage || 5,
-      wallet: userSettings.selectedWallet
-    };
-    
-    const confirmation = await manualTradingService.createTradeConfirmation(userId, {
-      ...tradeParams,
-      tradeType: 'sell'
-    });
-    
-    if (!confirmation.success) {
-      return ctx.reply(`❌ Failed to create trade confirmation: ${confirmation.message}`);
-    }
-    
-    // Format sell confirmation
-    const pnlEmoji = position.pnl >= 0 ? '🟢' : '🔴';
-    const chainEmoji = position.chain === 'solana' ? '🟣' : position.chain === 'ethereum' ? '🔷' : '🟡';
-    
-    let message = `🔴 **Confirm SELL Order** ${chainEmoji}\n\n`;
-    message += `🎯 **${position.tokenName}** (${position.tokenSymbol})\n`;
-    message += `**Sell Amount:** ${percentage}% of position\n\n`;
-    
-    message += `📊 **Position Details:**\n`;
-    message += `• **Total Amount:** ${position.amount?.toFixed(4) || 0} tokens\n`;
-    message += `• **Avg Buy Price:** $${position.avgBuyPrice?.toFixed(6) || 0}\n`;
-    message += `• **Current Price:** $${position.currentPrice?.toFixed(6) || 0}\n`;
-    message += `• **Selling:** ${((position.amount || 0) * percentage / 100).toFixed(4)} tokens\n\n`;
-    
-    message += `💰 **PnL Analysis:**\n`;
-    message += `• **Current PnL:** ${pnlEmoji} ${position.pnl >= 0 ? '+' : ''}${position.pnlPercentage?.toFixed(2) || 0}% ($${position.pnl?.toFixed(2) || 0})\n`;
-    message += `• **Cost Basis:** $${((position.amount || 0) * (position.avgBuyPrice || 0)).toFixed(2)}\n`;
-    message += `• **Current Value:** $${position.currentValue?.toFixed(2) || 0}\n\n`;
-    
-    message += `⚠️ **Reply YES to confirm or NO to cancel**\n`;
-    message += `⏰ Expires in 60 seconds`;
-    
-    // Store trade ID in session
-    ctx.session.pendingTradeId = confirmation.tradeId;
-    ctx.session.awaitingTradeConfirmation = true;
-    
-    await ctx.reply(message, { parse_mode: 'Markdown' });
-    
-  } catch (error) {
-    console.error('Sell command error:', error);
-    await ctx.reply('❌ Error processing sell command. Please try again.');
-  }
-});
-
 // Centralized message handler to prevent conflicts
-async function handleTextMessage(ctx) {
+async function handleTextMessage(ctx, next) {
   const session = ctx.session || {};
   const userId = String(ctx.from.id);
   const input = ctx.message.text.trim();
   
   // Check if it's a command - if so, let command handlers handle it
   if (input.startsWith('/')) {
-    return;
+    return next();
   }
 
   try {
@@ -322,17 +45,37 @@ async function handleTextMessage(ctx) {
       
       // Check if service is initialized
       if (!service.isInitialized()) {
-        ctx.session.awaitingTradeConfirmation = false;
-        ctx.session.pendingTradeId = null;
-        return ctx.reply('❌ Trading service not initialized. Please try again.');
+        // Try to force initialize
+        await service.forceInitialize();
+        if (!service.isInitialized()) {
+          ctx.session.awaitingTradeConfirmation = false;
+          ctx.session.pendingTradeId = null;
+          return ctx.reply('❌ Trading service not initialized. Please try again.');
+        }
       }
       
       if (response === 'yes' || response === 'y' || input.toUpperCase() === 'YES') {
         try {
+          const loadingMsg = await ctx.reply('🔄 Executing trade on blockchain...');
+          
           const result = await service.executeConfirmedTrade(session.pendingTradeId, userId);
           ctx.session.awaitingTradeConfirmation = false;
           ctx.session.pendingTradeId = null;
-          return ctx.reply(result.message, { parse_mode: 'Markdown' });
+          
+          try {
+            await ctx.telegram.editMessageText(
+              ctx.chat.id,
+              loadingMsg.message_id,
+              undefined,
+              result.message,
+              { parse_mode: 'Markdown', disable_web_page_preview: true }
+            );
+          } catch (editError) {
+            // If edit fails, send as new message
+            await ctx.reply(result.message, { parse_mode: 'Markdown', disable_web_page_preview: true });
+          }
+          
+          return;
         } catch (error) {
           ctx.session.awaitingTradeConfirmation = false;
           ctx.session.pendingTradeId = null;
@@ -374,19 +117,52 @@ async function handleTextMessage(ctx) {
         return ctx.reply('❌ Trading service not available. Please try again.');
       }
       
-      const result = await service.processBuyCommand(userId, `${session.quickBuyAmount} ${input}`);
-      
-      if (result.needsConfirmation) {
-        ctx.session.pendingTradeId = result.tradeId;
-        ctx.session.awaitingTradeConfirmation = true;
-        ctx.session.awaitingQuickBuyToken = false;
-        ctx.session.quickBuyAmount = null;
-      } else {
-        ctx.session.awaitingQuickBuyToken = false;
-        ctx.session.quickBuyAmount = null;
+      // Check if service is initialized
+      if (!service.isInitialized()) {
+        // Try to force initialize
+        await service.forceInitialize();
+        if (!service.isInitialized()) {
+          ctx.session.awaitingQuickBuyToken = false;
+          ctx.session.quickBuyAmount = null;
+          return ctx.reply('❌ Trading service not initialized. Please try again.');
+        }
       }
       
-      return ctx.reply(result.message, { parse_mode: 'Markdown' });
+      const loadingMsg = await ctx.reply('🔍 Analyzing token and preparing trade...');
+      
+      try {
+        const result = await service.processBuyCommand(userId, `${session.quickBuyAmount} ${input}`);
+        
+        if (result.needsConfirmation) {
+          ctx.session.pendingTradeId = result.tradeId;
+          ctx.session.awaitingTradeConfirmation = true;
+          ctx.session.awaitingQuickBuyToken = false;
+          ctx.session.quickBuyAmount = null;
+        } else {
+          ctx.session.awaitingQuickBuyToken = false;
+          ctx.session.quickBuyAmount = null;
+        }
+        
+        await ctx.telegram.editMessageText(
+          ctx.chat.id,
+          loadingMsg.message_id,
+          undefined,
+          result.message,
+          { parse_mode: 'Markdown' }
+        );
+      } catch (error) {
+        ctx.session.awaitingQuickBuyToken = false;
+        ctx.session.quickBuyAmount = null;
+        
+        await ctx.telegram.editMessageText(
+          ctx.chat.id,
+          loadingMsg.message_id,
+          undefined,
+          `❌ Error preparing trade: ${error.message}`
+        );
+      }
+      
+      return;
     }
 
     // Handle wallet naming - step 1: select wallet
@@ -414,7 +190,7 @@ async function handleTextMessage(ctx) {
         ctx.session.awaitingWalletName = false;
         ctx.session.walletToName = null;
         
-        return ctx.reply(`✅ Wallet named successfully!\n\n**Name:** ${input}\n**Wallet:** \`${session.walletToName.substring(0, 8)}...${session.walletToName.substring(session.walletToName.length - 8)}\``, 
+        return ctx.reply(`✅ Wallet named successfully!\n\n**Name:** ${input}\n**Wallet:** \`${session.walletToName.substring(0, 6)}...${session.walletToName.substring(session.walletToName.length - 4)}\``, 
           { parse_mode: 'Markdown' });
       }
     }
@@ -522,16 +298,25 @@ async function handleTextMessage(ctx) {
 
     // Handle chain selection
     if (session.awaitingChain) {
-      const validChains = ['solana', 'ethereum', 'bsc'];
+      const validChains = ['solana', 'ethereum', 'bsc', 'polygon', 'arbitrum', 'base'];
       const chain = input.toLowerCase();
       
       if (!validChains.includes(chain)) {
-        return ctx.reply('❌ Invalid chain. Please enter "solana", "ethereum", or "bsc" or type /cancel to exit.');
+        return ctx.reply(`❌ Invalid chain. Please enter one of: ${validChains.join(', ')} or type /cancel to exit.`);
       }
       
       await userService.setChain(userId, chain);
       ctx.session.awaitingChain = false;
-      return ctx.reply(`✅ Blockchain has been set successfully.\n🔗 Chain: ${chain.toUpperCase()}`);
+      
+      // Check if user has a wallet for this chain
+      const userData = await userService.getUserSettings(userId);
+      const hasWallet = userData.custodialWallets && userData.custodialWallets[chain];
+      
+      if (hasWallet) {
+        return ctx.reply(`✅ Blockchain has been set to ${chain.toUpperCase()}\n\n💼 You already have a ${chain.toUpperCase()} wallet. Use /wallet to view it.`);
+      } else {
+        return ctx.reply(`✅ Blockchain has been set to ${chain.toUpperCase()}\n\n⚠️ You don't have a ${chain.toUpperCase()} wallet yet. Use /wallet to create one.`);
+      }
     }
 
     // Handle amount setting
@@ -698,11 +483,11 @@ async function handleTextMessage(ctx) {
 
     // Handle switch wallet chain
     if (session.awaitingSwitchChain) {
-      const validChains = ['solana', 'ethereum', 'bsc'];
+      const validChains = ['solana', 'ethereum', 'bsc', 'polygon', 'arbitrum', 'base'];
       const chain = input.toLowerCase();
       
       if (!validChains.includes(chain)) {
-        return ctx.reply('❌ Invalid chain. Please enter "solana", "ethereum", or "bsc" or type /cancel to exit.');
+        return ctx.reply(`❌ Invalid chain. Please enter one of: ${validChains.join(', ')} or type /cancel to exit.`);
       }
       
       // Update user's preferred chain
@@ -710,7 +495,6 @@ async function handleTextMessage(ctx) {
       ctx.session.awaitingSwitchChain = false;
       
       // Show wallet for new chain
-      const walletService = require('../../services/walletService');
       const wallet = await walletService.getOrCreateWallet(userId, chain);
       
       const message = `✅ Switched to ${chain.toUpperCase()}
@@ -721,6 +505,74 @@ async function handleTextMessage(ctx) {
 Use /wallet to see full details or /balance to check funds.`;
       
       return ctx.reply(message, { parse_mode: 'Markdown' });
+    }
+
+    // Handle wallet regeneration confirmation
+    if (session.awaitingWalletRegeneration && session.awaitingRegenerationChain) {
+      const lowerInput = input.toLowerCase();
+      if (lowerInput === 'regenerate') {
+        const chain = session.awaitingRegenerationChain;
+        ctx.session.awaitingWalletRegeneration = false;
+        ctx.session.awaitingRegenerationChain = null;
+        
+        const loadingMsg = await ctx.reply('🔄 Creating fresh wallet...');
+        
+        try {
+          const result = await walletService.regenerateWallet(userId, chain);
+          
+          if (!result.success) {
+            await ctx.telegram.editMessageText(
+              ctx.chat.id,
+              loadingMsg.message_id,
+              undefined,
+              '❌ Failed to create fresh wallet. Please try again.'
+            );
+            return;
+          }
+          
+          let message = `✅ **Fresh ${chain.toUpperCase()} Wallet Created!**\n\n`;
+          message += `📍 **New Address:**\n\`${result.address}\`\n\n`;
+          
+          if (result.mnemonic) {
+            message += `📝 **Seed Phrase:**\n\`${result.mnemonic}\`\n\n`;
+          }
+          
+          message += `🎉 **Success!**\n`;
+          message += `• Fresh wallet with full encryption\n`;
+          message += `• Private key accessible via /exportwallet\n`;
+          message += `• Ready for trading and transfers\n\n`;
+          
+          message += `💡 **Next Steps:**\n`;
+          message += `• Send funds to your new address above\n`;
+          message += `• Use /balance to check your balance\n`;
+          message += `• Use /buy to start trading\n\n`;
+          
+          message += `🔒 **Important:**\n`;
+          message += `• This is a completely new wallet\n`;
+          message += `• Your old wallet address still exists\n`;
+          message += `• Transfer funds from old to new if needed`;
+          
+          await ctx.telegram.editMessageText(
+            ctx.chat.id,
+            loadingMsg.message_id,
+            undefined,
+            message,
+            { parse_mode: 'Markdown' }
+          );
+          
+        } catch (error) {
+          console.error('Wallet regeneration error:', error);
+          
+          await ctx.telegram.editMessageText(
+            ctx.chat.id,
+            loadingMsg.message_id,
+            undefined,
+            '❌ Failed to create fresh wallet. Please try again.'
+          );
+        }
+        
+        return;
+      }
     }
 
     // Handle support links setting (admin only)
@@ -764,8 +616,8 @@ Users can now access these via /support`);
       }
     }
 
-    // If no session is waiting, ignore the message
-    return;
+    // If no session is waiting, pass to next handler
+    return next();
 
   } catch (err) {
     console.error('❌ Error handling message:', err);
@@ -773,4 +625,4 @@ Users can now access these via /support`);
   }
 }
 
-module.exports = { handleTextMessage, messageHandler }; 
+module.exports = { handleTextMessage, messageHandler };

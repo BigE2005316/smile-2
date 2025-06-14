@@ -1,6 +1,7 @@
-// services/tokenDataService.js - Enhanced token data fetching
+// services/tokenDataService.js - Enhanced token data fetching with multi-chain support
 const axios = require('axios');
 const { Connection, PublicKey } = require('@solana/web3.js');
+const { getRPCManager } = require('./rpcManager');
 
 // Cache token data to reduce API calls
 const tokenCache = new Map();
@@ -15,7 +16,10 @@ async function getTokenFromDexScreener(tokenAddress, chain) {
     const chainMap = {
       'solana': 'solana',
       'ethereum': 'ethereum',
-      'bsc': 'bsc'
+      'bsc': 'bsc',
+      'polygon': 'polygon',
+      'arbitrum': 'arbitrum',
+      'base': 'base'
     };
     
     const response = await axios.get(`${DEXSCREENER_API}/tokens/${tokenAddress}`, {
@@ -46,7 +50,9 @@ async function getTokenFromDexScreener(tokenAddress, chain) {
           priceChange24h: pair.priceChange?.h24 || 0,
           holders: null, // DexScreener doesn't provide holder count
           createdAt: pair.pairCreatedAt,
-          dexScreenerUrl: pair.url
+          dexScreenerUrl: pair.url,
+          dexId: pair.dexId,
+          pairAddress: pair.pairAddress
         };
       }
     }
@@ -60,7 +66,9 @@ async function getTokenFromDexScreener(tokenAddress, chain) {
 // Get Solana token metadata
 async function getSolanaTokenMetadata(tokenAddress) {
   try {
-    const connection = new Connection(process.env.SOLANA_RPC || 'https://api.mainnet-beta.solana.com');
+    const rpcManager = getRPCManager();
+    const connection = await rpcManager.getSolanaConnection();
+    
     const mintPubkey = new PublicKey(tokenAddress);
     
     // Get token supply for market cap calculation
@@ -121,6 +129,8 @@ async function getTokenData(tokenAddress, chain) {
       const ageInDays = Math.floor((now - created) / (1000 * 60 * 60 * 24));
       const ageInHours = Math.floor((now - created) / (1000 * 60 * 60));
       
+      tokenData.ageHours = ageInHours;
+      
       if (ageInDays > 0) {
         tokenData.age = `${ageInDays} day${ageInDays > 1 ? 's' : ''}`;
       } else {
@@ -129,6 +139,7 @@ async function getTokenData(tokenAddress, chain) {
     } else {
       tokenData = tokenData || {};
       tokenData.age = 'Unknown';
+      tokenData.ageHours = 0;
     }
     
     // Add explorer links
@@ -156,6 +167,7 @@ async function getTokenData(tokenAddress, chain) {
       priceChange24h: 0,
       holders: null,
       age: 'Unknown',
+      ageHours: 0,
       explorerLinks: getExplorerLinks(tokenAddress, chain)
     };
     
@@ -173,6 +185,37 @@ async function getTokenData(tokenAddress, chain) {
       priceChange24h: 0,
       holders: null,
       age: 'Unknown',
+      ageHours: 0,
+      explorerLinks: getExplorerLinks(tokenAddress, chain)
+    };
+  }
+}
+
+// Get token info (simplified version of getTokenData)
+async function getTokenInfo(tokenAddress, chain) {
+  try {
+    // Try to get from cache first
+    const cacheKey = `${chain}:${tokenAddress}`;
+    const cached = tokenCache.get(cacheKey);
+    
+    if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
+      return cached.data;
+    }
+    
+    // Get full token data
+    const tokenData = await getTokenData(tokenAddress, chain);
+    return tokenData;
+  } catch (err) {
+    console.error('Error getting token info:', err);
+    return {
+      name: 'Unknown Token',
+      symbol: 'UNKNOWN',
+      address: tokenAddress,
+      price: 0,
+      marketCap: 0,
+      liquidity: 0,
+      volume24h: 0,
+      priceChange24h: 0,
       explorerLinks: getExplorerLinks(tokenAddress, chain)
     };
   }
@@ -184,7 +227,8 @@ function getExplorerLinks(tokenAddress, chain) {
     axiom: null,
     dexscreener: null,
     birdeye: null,
-    explorer: null
+    explorer: null,
+    geckoterminal: null
   };
   
   switch (chain) {
@@ -193,17 +237,38 @@ function getExplorerLinks(tokenAddress, chain) {
       links.dexscreener = `https://dexscreener.com/solana/${tokenAddress}`;
       links.birdeye = `https://birdeye.so/token/${tokenAddress}`;
       links.explorer = `https://solscan.io/token/${tokenAddress}`;
+      links.geckoterminal = `https://www.geckoterminal.com/solana/tokens/${tokenAddress}`;
       break;
       
     case 'ethereum':
       links.axiom = `https://axiom.xyz/token/${tokenAddress}`;
       links.dexscreener = `https://dexscreener.com/ethereum/${tokenAddress}`;
       links.explorer = `https://etherscan.io/token/${tokenAddress}`;
+      links.geckoterminal = `https://www.geckoterminal.com/eth/tokens/${tokenAddress}`;
       break;
       
     case 'bsc':
       links.dexscreener = `https://dexscreener.com/bsc/${tokenAddress}`;
       links.explorer = `https://bscscan.com/token/${tokenAddress}`;
+      links.geckoterminal = `https://www.geckoterminal.com/bsc/tokens/${tokenAddress}`;
+      break;
+      
+    case 'polygon':
+      links.dexscreener = `https://dexscreener.com/polygon/${tokenAddress}`;
+      links.explorer = `https://polygonscan.com/token/${tokenAddress}`;
+      links.geckoterminal = `https://www.geckoterminal.com/polygon/tokens/${tokenAddress}`;
+      break;
+      
+    case 'arbitrum':
+      links.dexscreener = `https://dexscreener.com/arbitrum/${tokenAddress}`;
+      links.explorer = `https://arbiscan.io/token/${tokenAddress}`;
+      links.geckoterminal = `https://www.geckoterminal.com/arbitrum/tokens/${tokenAddress}`;
+      break;
+      
+    case 'base':
+      links.dexscreener = `https://dexscreener.com/base/${tokenAddress}`;
+      links.explorer = `https://basescan.org/token/${tokenAddress}`;
+      links.geckoterminal = `https://www.geckoterminal.com/base/tokens/${tokenAddress}`;
       break;
   }
   
@@ -226,7 +291,7 @@ function formatTokenMessage(tokenData, action, amount, chain) {
   return `🎯 **${tokenData.name}** (${tokenData.symbol})
 
 **Action:** ${action.toUpperCase()}
-**Amount:** ${amount} ${chain === 'solana' ? 'SOL' : chain === 'ethereum' ? 'ETH' : 'BNB'}
+**Amount:** ${amount} ${chain === 'solana' ? 'SOL' : chain === 'ethereum' ? 'ETH' : chain === 'bsc' ? 'BNB' : chain === 'polygon' ? 'MATIC' : chain === 'arbitrum' ? 'ETH' : 'ETH'}
 
 📊 **Token Info:**
 • **Price:** $${tokenData.priceUsd.toFixed(6)}
@@ -243,8 +308,16 @@ ${tokenData.holders ? `• **Holders:** ${formatNumber(tokenData.holders)}` : ''
 ${tokenData.explorerLinks.axiom ? `[Axiom](${tokenData.explorerLinks.axiom}) | ` : ''}[DexScreener](${tokenData.explorerLinks.dexscreener})${tokenData.explorerLinks.birdeye ? ` | [Birdeye](${tokenData.explorerLinks.birdeye})` : ''} | [Explorer](${tokenData.explorerLinks.explorer})`;
 }
 
+// Clear token cache
+function clearCache() {
+  tokenCache.clear();
+  console.log('🧹 Token data cache cleared');
+}
+
 module.exports = {
   getTokenData,
+  getTokenInfo,
   formatTokenMessage,
-  formatNumber
-}; 
+  formatNumber,
+  clearCache
+};

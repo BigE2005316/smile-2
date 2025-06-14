@@ -1,4 +1,4 @@
-// services/rpcManager.js - Advanced RPC Manager with rate limiting and failover
+// services/rpcManager.js - Enhanced Multi-Chain RPC Manager with Failover
 const axios = require('axios');
 const { Connection, clusterApiUrl } = require('@solana/web3.js');
 const { JsonRpcProvider } = require('ethers');
@@ -11,21 +11,37 @@ class RPCManager {
     this.lastHealthCheck = 0;
     this.healthCheckInterval = 30000; // 30 seconds
     
-    // RPC configurations - PREMIUM + RELIABLE FREE ENDPOINTS
+    // Enhanced RPC configurations with multiple chains
     this.rpcConfigs = {
       solana: [
-        // Reliable Solana endpoints
-        { url: process.env.ALCHEMY_SOLANA_URL || 'https://api.mainnet-beta.solana.com', priority: 1, maxRequestsPerSecond: 10 },
+        { url: process.env.ALCHEMY_SOLANA_URL || process.env.HELIUS_RPC_URL || 'https://api.mainnet-beta.solana.com', priority: 1, maxRequestsPerSecond: 10 },
+        { url: 'https://solana-mainnet.g.alchemy.com/v2/demo', priority: 2, maxRequestsPerSecond: 5 },
+        { url: 'https://api.mainnet-beta.solana.com', priority: 3, maxRequestsPerSecond: 3 }
       ],
       ethereum: [
-        // Premium Alchemy endpoint (when user sets it up)
         { url: process.env.ALCHEMY_ETH_URL || 'https://ethereum.blockpi.network/v1/rpc/public', priority: 1, maxRequestsPerSecond: 10 },
         { url: 'https://eth.api.onfinality.io/public', priority: 2, maxRequestsPerSecond: 3 },
+        { url: 'https://rpc.ankr.com/eth', priority: 3, maxRequestsPerSecond: 2 }
       ],
       bsc: [
-        // Premium Alchemy endpoint (when user sets it up) + reliable free
         { url: process.env.ALCHEMY_BSC_URL || 'https://bsc-dataseed.binance.org/', priority: 1, maxRequestsPerSecond: 8 },
-        // Removed problematic blockpi endpoint that was causing failures
+        { url: 'https://bsc-dataseed1.defibit.io/', priority: 2, maxRequestsPerSecond: 5 },
+        { url: 'https://rpc.ankr.com/bsc', priority: 3, maxRequestsPerSecond: 3 }
+      ],
+      polygon: [
+        { url: process.env.POLYGON_RPC_URL || 'https://polygon-rpc.com/', priority: 1, maxRequestsPerSecond: 8 },
+        { url: 'https://rpc.ankr.com/polygon', priority: 2, maxRequestsPerSecond: 5 },
+        { url: 'https://polygon.blockpi.network/v1/rpc/public', priority: 3, maxRequestsPerSecond: 3 }
+      ],
+      arbitrum: [
+        { url: process.env.ARBITRUM_RPC_URL || 'https://arb1.arbitrum.io/rpc', priority: 1, maxRequestsPerSecond: 8 },
+        { url: 'https://rpc.ankr.com/arbitrum', priority: 2, maxRequestsPerSecond: 5 },
+        { url: 'https://arbitrum.blockpi.network/v1/rpc/public', priority: 3, maxRequestsPerSecond: 3 }
+      ],
+      base: [
+        { url: process.env.BASE_RPC_URL || 'https://mainnet.base.org', priority: 1, maxRequestsPerSecond: 8 },
+        { url: 'https://base.blockpi.network/v1/rpc/public', priority: 2, maxRequestsPerSecond: 5 },
+        { url: 'https://rpc.ankr.com/base', priority: 3, maxRequestsPerSecond: 3 }
       ]
     };
     
@@ -36,7 +52,7 @@ class RPCManager {
 
   async initialize() {
     try {
-      console.log('🌐 Initializing Advanced RPC Manager...');
+      console.log('🌐 Initializing Enhanced Multi-Chain RPC Manager...');
       
       // Initialize connections for each chain
       for (const [chain, configs] of Object.entries(this.rpcConfigs)) {
@@ -71,7 +87,7 @@ class RPCManager {
               lastReset: Date.now()
             });
             
-            console.log(`✅ ${chain.toUpperCase()} RPC initialized: ${config.url}`);
+            console.log(`✅ ${chain.toUpperCase()} RPC initialized: ${config.url.substring(0, 50)}...`);
             
           } catch (error) {
             console.warn(`⚠️ Failed to initialize ${chain} RPC ${config.url}:`, error.message);
@@ -84,7 +100,14 @@ class RPCManager {
       this.startHealthMonitoring();
       
       this.initialized = true;
-      console.log('✅ RPC Manager initialized successfully');
+      console.log('✅ Multi-Chain RPC Manager initialized successfully');
+      
+      // Log status
+      const status = this.getStatus();
+      console.log(`📊 Total RPC Status: ${status.healthyRPCs}/${status.totalRPCs} healthy connections`);
+      Object.entries(status.chains).forEach(([chain, chainStatus]) => {
+        console.log(`   ${chain.toUpperCase()}: ${chainStatus.healthy}/${chainStatus.total} healthy`);
+      });
       
     } catch (error) {
       console.error('❌ Failed to initialize RPC Manager:', error);
@@ -109,7 +132,7 @@ class RPCManager {
     if (healthyConnections.length === 0) {
       // Reset failed RPCs if all are failed (circuit breaker)
       if (this.failedRPCs.size >= connections.length) {
-        console.log('🔄 Resetting failed RPCs (circuit breaker)');
+        console.log(`🔄 Resetting failed RPCs for ${chain} (circuit breaker)`);
         this.failedRPCs.clear();
         // Try again with reset
         return this.getBestRPC(chain);
@@ -290,14 +313,14 @@ class RPCManager {
           if (rpc.errorCount >= 3) {
             rpc.healthy = false;
             this.failedRPCs.add(rpc.url);
-            console.warn(`⚠️ Marking ${chain} RPC as unhealthy: ${rpc.url}`);
+            console.warn(`⚠️ Marking ${chain} RPC as unhealthy: ${rpc.url.substring(0, 50)}...`);
           }
         }
       }
     }
   }
 
-  // Helper methods for specific operations
+  // Helper methods for specific chains
   async getSolanaConnection() {
     return this.getBestRPC('solana');
   }
@@ -310,6 +333,18 @@ class RPCManager {
     return this.getBestRPC('bsc');
   }
 
+  async getPolygonProvider() {
+    return this.getBestRPC('polygon');
+  }
+
+  async getArbitrumProvider() {
+    return this.getBestRPC('arbitrum');
+  }
+
+  async getBaseProvider() {
+    return this.getBestRPC('base');
+  }
+
   // Get status for monitoring
   getStatus() {
     const status = {
@@ -317,7 +352,8 @@ class RPCManager {
       chains: {},
       failedRPCs: Array.from(this.failedRPCs),
       totalRPCs: 0,
-      healthyRPCs: 0
+      healthyRPCs: 0,
+      supportedChains: Object.keys(this.rpcConfigs)
     };
 
     for (const [chain, connections] of Object.entries(this.connections)) {
@@ -326,7 +362,13 @@ class RPCManager {
       status.chains[chain] = {
         total: connections.length,
         healthy: healthy.length,
-        failed: connections.length - healthy.length
+        failed: connections.length - healthy.length,
+        endpoints: connections.map(c => ({
+          url: c.url.substring(0, 50) + '...',
+          healthy: c.healthy,
+          priority: c.priority,
+          requestCount: c.requestCount
+        }))
       };
       
       status.totalRPCs += connections.length;
@@ -334,6 +376,49 @@ class RPCManager {
     }
 
     return status;
+  }
+
+  // Add new RPC endpoint
+  addRPC(chain, url, priority = 10) {
+    if (!this.rpcConfigs[chain]) {
+      this.rpcConfigs[chain] = [];
+    }
+
+    this.rpcConfigs[chain].push({
+      url,
+      priority,
+      maxRequestsPerSecond: 5
+    });
+
+    console.log(`➕ Added new RPC for ${chain}: ${url}`);
+  }
+
+  // Remove RPC endpoint
+  removeRPC(chain, url) {
+    if (this.rpcConfigs[chain]) {
+      this.rpcConfigs[chain] = this.rpcConfigs[chain].filter(rpc => rpc.url !== url);
+      this.failedRPCs.delete(url);
+      console.log(`➖ Removed RPC for ${chain}: ${url}`);
+    }
+  }
+
+  // Get chain-specific stats
+  getChainStats(chain) {
+    if (!this.connections[chain]) {
+      return null;
+    }
+
+    const connections = this.connections[chain];
+    const healthy = connections.filter(c => c.healthy);
+    
+    return {
+      chain,
+      totalEndpoints: connections.length,
+      healthyEndpoints: healthy.length,
+      totalRequests: connections.reduce((sum, c) => sum + c.requestCount, 0),
+      averageResponseTime: 'N/A', // Could be implemented
+      lastHealthCheck: new Date(this.lastHealthCheck).toISOString()
+    };
   }
 }
 
@@ -350,4 +435,4 @@ function getRPCManager() {
 module.exports = {
   getRPCManager,
   RPCManager
-}; 
+};
